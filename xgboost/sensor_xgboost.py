@@ -1,6 +1,7 @@
 """Teach XGBoost classification with synthetic high-mountain weather sensors."""
 
 from pathlib import Path
+import argparse
 
 import numpy as np
 import pandas as pd
@@ -8,9 +9,11 @@ from sklearn.metrics import classification_report, confusion_matrix, roc_auc_sco
 from xgboost import XGBClassifier
 
 
-ROOT = Path(__file__).resolve().parent
-DATA_DIR = ROOT / "data"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DATA_DIR = PROJECT_ROOT / "data"
+MODEL_PATH = Path(__file__).resolve().parent / "models" / "blizzard_xgb.json"
 RANDOM_SEED = 42
+THRESHOLD = 0.5
 
 
 def make_sensor_data(days: int = 365) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -82,25 +85,63 @@ def build_morning_examples(hourly: pd.DataFrame, labels: pd.DataFrame) -> pd.Dat
     return pd.DataFrame(rows)
 
 
+def predict_from_csv(input_path: Path, output_path: Path | None = None) -> None:
+    """Load the exported classifier and predict from one or more engineered rows."""
+    model = XGBClassifier()
+    model.load_model(MODEL_PATH)
+    feature_names = list(model.feature_names_in_)
+    inputs = pd.read_csv(input_path)
+    missing = [name for name in feature_names if name not in inputs.columns]
+    if missing:
+        raise ValueError(f"Input CSV is missing required feature columns: {', '.join(missing)}")
+    probabilities = model.predict_proba(inputs[feature_names])[:, 1]
+    results = pd.DataFrame({
+        "blizzard_probability": probabilities,
+        "blizzard_prediction": (probabilities >= THRESHOLD).astype(int),
+    })
+    destination = output_path or input_path.with_name(f"{input_path.stem}_xgboost_predictions.csv")
+    results.to_csv(destination, index=False)
+    for row_number, probability in enumerate(probabilities, start=1):
+        print(f"Row {row_number}: blizzard probability={probability:.3f}, prediction={int(probability >= THRESHOLD)}")
+    print(f"Saved predictions to: {destination}")
+
+
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Train or use the mountain blizzard XGBoost model.")
+    parser.add_argument("--predict-csv", type=Path, help="Predict from a CSV of engineered feature rows.")
+    parser.add_argument("--output", type=Path, help="Optional predictions CSV path (inference only).")
+    args = parser.parse_args()
+
+    if args.predict_csv:
+        if not MODEL_PATH.exists():
+            raise FileNotFoundError(f"Trained model not found at {MODEL_PATH}. Run this script without --predict-csv first.")
+        predict_from_csv(args.predict_csv, args.output)
+        return
+
     DATA_DIR.mkdir(exist_ok=True)
     hourly, labels = make_sensor_data()
     hourly.to_csv(DATA_DIR / "mountain_sensor_readings.csv", index=False)
     examples = build_morning_examples(hourly, labels)
     examples.to_csv(DATA_DIR / "daily_blizzard_examples.csv", index=False)
+    examples.iloc[[-1]].drop(columns=["date", "blizzard_today"]).to_csv(
+        DATA_DIR / "inference_example.csv", index=False
+    )
 
+    # Save a chronological split so both model workflows consume identical rows.
     target = "blizzard_today"
-    features = examples.drop(columns=["date", target])
-    y = examples[target].astype(int)
     split_at = int(len(examples) * 0.8)
-    X_train, X_test = features.iloc[:split_at], features.iloc[split_at:]
-    y_train, y_test = y.iloc[:split_at], y.iloc[split_at:]
-
-    # Save the exact chronological rows used by fit() and evaluation below.
     train_set = examples.iloc[:split_at].reset_index(drop=True)
     test_set = examples.iloc[split_at:].reset_index(drop=True)
     train_set.to_csv(DATA_DIR / "train_set.csv", index=False)
     test_set.to_csv(DATA_DIR / "test_set.csv", index=False)
+
+    # Train and evaluate from the persisted files shared with deep_learning/.
+    train_set = pd.read_csv(DATA_DIR / "train_set.csv")
+    test_set = pd.read_csv(DATA_DIR / "test_set.csv")
+    X_train = train_set.drop(columns=["date", target])
+    y_train = train_set[target].astype(int)
+    X_test = test_set.drop(columns=["date", target])
+    y_test = test_set[target].astype(int)
 
     model = XGBClassifier(
         objective="binary:logistic",
@@ -116,6 +157,8 @@ def main() -> None:
         n_jobs=-1,
     )
     model.fit(X_train, y_train, verbose=False)
+    MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
+    model.save_model(MODEL_PATH)
     probabilities = model.predict_proba(X_test)[:, 1]
     predictions = (probabilities >= 0.5).astype(int)
 
@@ -129,13 +172,15 @@ def main() -> None:
     if y_test.nunique() == 2:
         print(f"ROC AUC: {roc_auc_score(y_test, probabilities):.3f}")
     print("\nTop engineered features:")
-    importance = pd.Series(model.feature_importances_, index=features.columns).sort_values(ascending=False)
+    importance = pd.Series(model.feature_importances_, index=X_train.columns).sort_values(ascending=False)
     print(importance.head(10).to_string())
     print(f"\nCreated: {DATA_DIR}")
+    print(f"Exported model: {MODEL_PATH}")
     print("  mountain_sensor_readings.csv — hourly synthetic readings")
     print("  daily_blizzard_examples.csv  — 06:00 engineered features and same-day label")
     print("  train_set.csv                — first 80% of days used by model.fit()")
     print("  test_set.csv                 — last 20% of days used for evaluation")
+    print("  inference_example.csv        — one synthetic feature row for prediction")
 
 
 if __name__ == "__main__":
