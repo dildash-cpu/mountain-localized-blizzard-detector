@@ -3,3 +3,4 @@
 .task-tmp/
 __pycache__/
 *.py[cod]
+data/*_predictions.csv

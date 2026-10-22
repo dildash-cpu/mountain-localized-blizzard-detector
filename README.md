@@ -17,13 +17,24 @@ At 06:00 local time, the model uses sensor readings and their changes since midn
 To regenerate the deterministic synthetic data and run XGBoost from the repository root:
 
 ```powershell
-python -m venv .venv-xgboost
-.\.venv-xgboost\Scripts\Activate.ps1
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
 python -m pip install -r xgboost\requirements.txt
 python xgboost\sensor_xgboost.py
 ```
 
 To run the deep-learning comparison in its own environment, see [`deep_learning/README.md`](deep_learning/README.md). The workflow uses the same saved train and test CSVs and applies feature standardization learned from training rows only.
+
+## Run predictions with the exported models
+
+After training has created the model files, run these from the repository root to predict from the included synthetic example row:
+
+```powershell
+.\.venv\Scripts\python.exe xgboost\sensor_xgboost.py --predict-csv data\inference_example.csv
+.\.venv-deep-learning\Scripts\python.exe deep_learning\sensor_mlp.py --predict-csv data\inference_example.csv
+```
+
+These commands run inference; they do not train the models. XGBoost writes `data/inference_example_xgboost_predictions.csv`, and deep learning writes `data/inference_example_deep_learning_predictions.csv`. Each file contains a probability and its thresholded 0/1 prediction. Replace the example with a CSV containing your engineered forecast row(s) to predict from your sensor data.
 
 ## Limitations
 
